@@ -192,8 +192,9 @@ not guarantees conferred on a Copilot subagent.
 
 Codex branch mode supports added single-frame PNG/JPEG/WebP with Pillow and a
 vision-capable CLI/model. Before reviewing images, read
-[image limits and prerequisites](references/images.md). Unsupported binary changes
-fail closed. Binary deletions are reviewed as deletion metadata in every mode,
+[image limits and prerequisites](references/images.md). Branch mode also reviews
+added `.json.gz` evidence as bounded, validated UTF-8 JSON; see the same reference
+for limits and provenance. Other unsupported binary changes fail closed. Binary deletions are reviewed as deletion metadata in every mode,
 without Pillow. Materialize partial-clone objects before review; isolated Git
 intentionally disables lazy network fetching.
 

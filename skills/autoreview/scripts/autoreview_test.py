@@ -6,6 +6,7 @@ import base64
 import contextlib
 import copy
 import hashlib
+import gzip
 import importlib.util
 import io
 import itertools
@@ -560,6 +561,85 @@ class AutoreviewImageGitTests(unittest.TestCase):
             append_images=[Image.new("RGB", (4, 4), "blue")], duration=100)
         with self.assertRaisesRegex(SystemExit, "animated"):
             AUTOREVIEW.image_media_type("image.webp", out.getvalue())
+
+
+class AutoreviewGzipJsonGitTests(unittest.TestCase):
+    setUp = AutoreviewImageGitTests.setUp
+    git = AutoreviewImageGitTests.git
+    commit = AutoreviewImageGitTests.commit
+
+    def test_added_json_gzip_uses_committed_bytes_and_full_decoded_evidence(self):
+        content = b'{"source": "committed", "counts": [1, 2, 3]}\n'
+        encoded = gzip.compress(content, mtime=0)
+        self.commit("evidence.json.gz", encoded)
+        (self.repo / "evidence.json.gz").write_bytes(gzip.compress(b'{"source":"dirty"}'))
+        bundle = AUTOREVIEW.branch_bundle(self.repo, self.base)
+        self.assertEqual(len(bundle.gzip_json), 1)
+        dataset = bundle.gzip_json[0]
+        self.assertEqual(dataset.path, "evidence.json.gz")
+        self.assertIn(content.decode(), dataset.content)
+        self.assertIn(hashlib.sha256(encoded).hexdigest(), dataset.content)
+        self.assertIn(hashlib.sha256(content).hexdigest(), dataset.content)
+        self.assertEqual(dataset.provenance[0], bundle.commit)
+        self.assertEqual(bundle.images, ())
+        with mock.patch.object(AUTOREVIEW, "build_review_prompts", return_value=["review"]) as build:
+            AUTOREVIEW.prepare_review_prompts(self.repo, "branch", self.base, bundle, "instructions", [], 512000)
+        self.assertIn(dataset, build.call_args.args[5])
+
+    def test_malformed_gzip_json_and_non_utf8_are_rejected(self):
+        cases = [b"not gzip", gzip.compress(b"not json"), gzip.compress(b'{"x":"\xff"}'),
+                 gzip.compress(b'{"x":1}')[:-3], gzip.compress(b'{"x":1}') + b"trailing garbage"]
+        for content in cases:
+            with self.subTest(content=content[:8]):
+                self.git("reset", "--hard", self.base)
+                self.commit("evidence.json.gz", content)
+                with self.assertRaisesRegex(SystemExit, "gzip JSON"):
+                    AUTOREVIEW.branch_bundle(self.repo, self.base)
+
+    def test_decoded_size_limit_rejects_compression_bombs(self):
+        self.commit("evidence.json.gz", gzip.compress(b'{"text":"' + b'x' * 1000 + b'"}'))
+        with mock.patch.object(AUTOREVIEW, "MAX_REVIEW_GZIP_JSON_BYTES", 100, create=True):
+            with self.assertRaisesRegex(SystemExit, "gzip JSON.*limit"):
+                AUTOREVIEW.branch_bundle(self.repo, self.base)
+
+    def test_encoded_size_limit_rejects_before_blob_capture(self):
+        self.commit("evidence.json.gz", gzip.compress(b'{"x":1}'))
+        original = AUTOREVIEW.git_bytes
+        def bounded(repo, *args, **kwargs):
+            if args[:2] == ("cat-file", "-s"):
+                return subprocess.CompletedProcess(args, 0, b"2097153\n", b"")
+            if args[:2] == ("cat-file", "blob"):
+                raise AssertionError("oversized gzip must not be captured")
+            return original(repo, *args, **kwargs)
+        with mock.patch.object(AUTOREVIEW, "git_bytes", side_effect=bounded):
+            with self.assertRaisesRegex(SystemExit, "gzip JSON.*limit"):
+                AUTOREVIEW.branch_bundle(self.repo, self.base)
+
+    def test_aggregate_decoded_limit_is_enforced(self):
+        self.commit("one.json.gz", gzip.compress(b'{"a":12345}'))
+        self.commit("two.json.gz", gzip.compress(b'{"b":12345}'))
+        with mock.patch.object(AUTOREVIEW, "MAX_REVIEW_GZIP_JSON_TOTAL_BYTES", 15, create=True):
+            with self.assertRaisesRegex(SystemExit, "gzip JSON.*limit"):
+                AUTOREVIEW.branch_bundle(self.repo, self.base)
+
+    def test_aggregate_encoded_limit_rejects_before_next_blob_capture(self):
+        data = gzip.compress(b'{"x":1}')
+        self.commit("one.json.gz", data)
+        self.commit("two.json.gz", data)
+        with mock.patch.object(AUTOREVIEW, "MAX_REVIEW_GZIP_ENCODED_TOTAL_BYTES", len(data)):
+            with self.assertRaisesRegex(SystemExit, "gzip JSON.*limit"):
+                AUTOREVIEW.branch_bundle(self.repo, self.base)
+
+    def test_modified_archives_and_sensitive_names_still_fail_closed(self):
+        self.commit("evidence.json.gz", gzip.compress(b'{"x":1}'))
+        base = self.git("rev-parse", "HEAD").strip()
+        self.commit("evidence.json.gz", gzip.compress(b'{"x":2}'))
+        with self.assertRaisesRegex(SystemExit, "only added.*gzip JSON"):
+            AUTOREVIEW.branch_bundle(self.repo, base)
+        self.git("reset", "--hard", self.base)
+        self.commit(".ssh/evidence.json.gz", gzip.compress(b'{"x":1}'))
+        with self.assertRaisesRegex(SystemExit, "sensitive.*gzip JSON"):
+            AUTOREVIEW.branch_bundle(self.repo, self.base)
 
 
 class AutoreviewPriorityTests(unittest.TestCase):

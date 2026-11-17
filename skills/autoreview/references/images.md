@@ -24,3 +24,17 @@
 
 - Partial clones: materialize required Git objects **before** review.
 - Isolated Git reader intentionally disables lazy network fetching; never weaken boundary.
+
+## Compressed JSON evidence
+
+Branch mode accepts added regular `.json.gz` files. The helper reads the pinned
+Git blob, validates complete UTF-8 JSON, and includes its full decoded text as
+untrusted committed-source context on the review evidence path. The context
+records the commit, blob, compressed SHA-256 and decoded SHA-256; dirty worktree
+bytes cannot replace it. Normal evidence batching keeps every decoded byte.
+
+Limits: 2 MiB compressed per file, 8 MiB compressed total, 8 MiB decoded per
+file, and 16 MiB decoded total. Check encoded Git object sizes before capture
+and bound decompression reads. Malformed, truncated, sensitive or oversized
+archives fail the whole review. Modified archives and text-only review-batch
+manifests remain unsupported. Existing binary-deletion behavior is unchanged.
